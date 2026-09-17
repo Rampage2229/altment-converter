@@ -1,0 +1,20 @@
+# ---------------------------------------------------------------
+# NEVER COMMIT: this holds the Mailchimp API key. It lives next to
+# the .exe on each machine and is the reason this repo can be public.
+config.json
+# ---------------------------------------------------------------
+
+# Per-machine runtime files
+app/                              # the launcher's cached copy of the converter
+email_images/                     # local reference copies of exported images
+Firmas/                           # signature photos (uploaded per machine)
+.upload_cache.json                # Mailchimp upload hash cache
+.custom_signatures.json           # signatures added from the dialog
+.signature_photo_overrides.json   # uploaded photo overrides
+
+# Build output
+dist/
+build/
+*.spec
+__pycache__/
+*.pyc

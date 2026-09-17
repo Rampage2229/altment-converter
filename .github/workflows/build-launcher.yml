@@ -1,0 +1,48 @@
+# Builds the launcher into a standalone Windows .exe on a real Windows
+# runner, so no wine is involved. Save as .github/workflows/build-launcher.yml
+#
+# Runs automatically when launcher.py changes (the only time a rebuild is
+# actually needed) and on demand from the Actions tab.
+#
+# No secrets are involved: the repo is public, so the launcher fetches the
+# converter anonymously, and the Mailchimp key lives in a config.json on each
+# machine rather than in the code.
+
+name: Build launcher exe
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "launcher.py"
+      - ".github/workflows/build-launcher.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: pip install pyinstaller python-docx lxml certifi
+
+      - name: Build
+        # --collect-all docx: python-docx ships a default .docx template that
+        # PyInstaller's import scan does not pick up on its own.
+        # --collect-all certifi: the CA bundle is a data file, so the import
+        # scan misses it too - and without it the updater fails on Wine.
+        run: >
+          pyinstaller --onefile --name AltmentConverter
+          --collect-all docx --collect-all lxml --collect-all certifi
+          launcher.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AltmentConverter
+          path: dist/AltmentConverter.exe
+          retention-days: 30
