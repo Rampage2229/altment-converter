@@ -51,7 +51,7 @@ import urllib.request
 # =====================================================================
 # CONFIGURATION - the only part you need to edit.
 # =====================================================================
-GITHUB_OWNER = "YOUR-GITHUB-USERNAME-OR-ORG"
+GITHUB_OWNER = "rampage2229"
 GITHUB_REPO = "altment-converter"
 GITHUB_BRANCH = "main"
 PAYLOAD_PATH_IN_REPO = "convert_to_html2.py"
