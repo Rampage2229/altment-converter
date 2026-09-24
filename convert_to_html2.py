@@ -114,7 +114,15 @@ TEXT_COLUMN_CLASS = "text-column"    # wrapper <div> the text column is built
                                       # edge of the page
 BODY_PADDING = "20px"
 BODY_TEXT_ALIGN = "justify"          # all body text is justified
-BODY_FONT_SIZE_FALLBACK_PT = 10      # used only if a doc's own default size can't be read
+BODY_FONT_SIZE_PT = 11.5             # body text size in the email (Arial 11.5)
+BODY_FONT_SIZE_FALLBACK_PT = 10      # the SOURCE doc's body size, used only if
+                                      # it can't be detected - see
+                                      # _dominant_body_size_pt. Every run size in
+                                      # the .docx is scaled by
+                                      # BODY_FONT_SIZE_PT / <detected body size>,
+                                      # so body text lands on 11.5pt while
+                                      # deliberately larger/smaller text (fund
+                                      # names, footnotes) keeps its proportion.
 
 
 # --------------------------------------------------------------------
@@ -178,13 +186,14 @@ IMAGE_MAX_WIDTH = "100%"             # fallback/ceiling only - each image's actu
                                       # keep their different sizes instead of
                                       # both being forced to this same width
 IMAGE_MARGIN = "15px auto"           # ...and centered
-TABLE_IMAGE_MAX_WIDTH = "400px"      # images inside table cells stay smaller
+TABLE_IMAGE_MAX_WIDTH = "520px"      # images inside table cells stay smaller (was 400px; raised with IMAGE_SCALE)
 
 TABLE_BORDER_TINT = 0.55             # how far the accent is blended toward
                                       # white to get the table/cell border
                                       # color (0 = full accent, 1 = white)
 TABLE_HEADER_TINT = 0.85             # same idea for the header row background
 TABLE_CELL_PADDING = "3px 8px"
+TABLE_BLOCK_MARGIN = "28px 0"        # vertical space around every table (was 10px 0)
 
 # --------------------------------------------------------------------
 # Native bar-chart tables.
@@ -227,7 +236,7 @@ LIST_ITEM_MARGIN = "3px 0"
 # + SIGNATURE_BLOCK_PADDING_TOP).
 SIGNATURE_BLOCK_MARGIN_TOP = "40px"
 SIGNATURE_BLOCK_PADDING_TOP = "20px"
-SIGNATURE_IMAGE_MAX_WIDTH = "650px"  # ~3x the old 220px - the image now carries all signature info, so let it fill the freed-up space
+SIGNATURE_IMAGE_MAX_WIDTH = "420px"  # was 650px - the signature read as oversized next to the body text
 SIGNATURE_CELL_SPACING = "20px"  # unused now that the signature is image-only (no adjacent text cell)
 SIGNATURE_FONT_SIZE = "10pt"  # unused now that the signature is image-only (no adjacent text cell)
 
@@ -698,7 +707,7 @@ _rebuild_signatures()
 # appended after the fixed one. Use "\n" inside "text" for line breaks.
 # TODO: replace these placeholder texts with the real disclaimer wording.
 DISCLAIMER_FIXED_TEXT = (
-    """This message is directed exclusively to its addressee. It contains confidential information the disclosure of which is prohibited by law. If you have received thismessage by mistake, please let us know by sending an email to cjimenez@altment.com or by calling +34 932 556 159 and destroy it immediately. You should
+    """This message is directed exclusively to its addressee. It contains confidential information the disclosure of which is prohibited by law. If you have received this message by mistake, please let us know by sending an email to cjimenez@altment.com or by calling +34 932 556 159 and destroy it immediately. You should
 know that both the reading and the copy or any other use of it is prohibited. We would also like to inform you that, in accordance with Spanish Law 3/2018 on
 Protection of Personal Data, the data used to send you this information are stored in a database. To exercise the right to access, rectify or cancel your data you
 can send a message to the above address. All services provided in the European Economic Area (EEA) by Altment Capital Partners, S.L. as Agent of Solventis
@@ -1793,7 +1802,12 @@ def build_signature_html(sig_key, images_dir):
             image_bytes = img_file.read()
         filename = os.path.basename(resolved_path)
         img_src = _image_src_for_bytes(image_bytes, filename, images_dir)
-        img_html = f'<img src="{img_src}" class="signature-image" />'
+        # Size inline as well as in the stylesheet: with <style> stripped, an
+        # unsized signature renders at the image file's native width.
+        img_html = (
+            f'<img src="{img_src}" class="signature-image" '
+            f'style="width: 100%; max-width: {SIGNATURE_IMAGE_MAX_WIDTH}; height: auto; display: block;" />'
+        )
         print(f"Signature image exported: {os.path.join(images_dir, filename)} -> src=\"{img_src}\"")
     else:
         print(f"Warning: signature image not found at '{sig_data.get('image')}'. Skipping image.")
@@ -1868,31 +1882,86 @@ def _normalize_link_url(url):
     url = (url or "").strip()
     if not url:
         return ""
-    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:", url) and not url.startswith("//"):
+    # Pasting from a browser or chat app often brings invisible characters
+    # along (zero-width spaces, non-breaking spaces, a trailing newline). They
+    # survive into href and produce a URL that looks right but 404s - drop
+    # all whitespace-class characters, which are never valid inside a URL.
+    url = re.sub(r"[\s\u200b\u200c\u200d\u2060\ufeff]+", "", url)
+    if url.startswith("//"):
+        url = "https:" + url
+    elif not re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:", url):
         url = "https://" + url
-    return _html_escape(url)
+    return _attr_escape(url)
 
 
 def _build_button_html(text, href, background_color, text_color=None):
-    """Renders one pill button. background_color and the label color are
-    written as INLINE styles rather than left to the .email-button class,
-    because each button can carry its own color and because several email
-    clients (Outlook especially) drop <style> rules but honour inline ones.
+    """Renders one pill button as a "bulletproof" email button: a one-cell
+    table, centered, with EVERY style inline.
 
-    text_color of None means "decide automatically": black or white,
-    whichever reads better on background_color. That's what stops a dark
-    navy or blue button from rendering near-invisible dark text - and it's
-    still overridable, from the dialog's button text-color picker."""
+    The earlier version was a <div class="email-button-block"><a class=
+    "email-button">, relying on the <style> block for centering, padding,
+    shape and display. Mailchimp content blocks and several email clients
+    drop <style>, and then the button collapsed into a bare colored link at
+    the left edge - which is what "not centered" and "links look broken"
+    were. With nothing depending on the stylesheet, the button survives:
+
+      * align="center" on the table AND margin:auto centers it everywhere,
+        including Outlook, which ignores margin:auto on its own;
+      * bgcolor on the <td> keeps the color in Outlook, which drops
+        background-color on <a>;
+      * the padding sits on the <a> (display:inline-block) so the WHOLE
+        pill is clickable, not just the letters;
+      * width/border/padding are reset inline because the stylesheet's
+        generic table/td rules (100% width, cell borders) would otherwise
+        hit this table too.
+
+    href must already be escaped for an attribute (see _normalize_link_url
+    and _build_mailto_href). text_color None = black or white by contrast."""
     if not text or not href:
         return ""
     label_color = text_color or _readable_text_color(background_color)
     return (
-        '<div class="email-button-block">'
-        f'<a href="{href}" class="email-button" '
-        f'style="background-color: {background_color}; color: {label_color};">'
+        '<table role="presentation" class="email-button" align="center" border="0" '
+        'cellpadding="0" cellspacing="0" '
+        'style="margin: 0 auto; width: auto; border-collapse: separate; border: none;">'
+        '<tr>'
+        f'<td align="center" bgcolor="{background_color}" '
+        f'style="background-color: {background_color}; border-radius: {BUTTON_BORDER_RADIUS}; '
+        'border: none; padding: 0; text-align: center;">'
+        f'<a href="{href}" target="_blank" rel="noopener" '
+        f'style="display: inline-block; padding: {BUTTON_PADDING}; '
+        f'font-family: {BODY_FONT_FAMILY}; font-size: {BUTTON_FONT_SIZE}; font-weight: bold; '
+        f'line-height: 1.2; color: {label_color}; text-decoration: none; '
+        f'border-radius: {BUTTON_BORDER_RADIUS}; letter-spacing: 0.5px;">'
         f'{_html_escape(text)}</a>'
-        '</div>'
+        '</td></tr></table>'
     )
+
+
+def build_buttons_block_html(*button_html_groups):
+    """Wraps every button (webinar + link buttons) in one centered block.
+
+    Each button is its own table; spacing between consecutive buttons comes
+    from a spacer row rather than margins, because vertical margins between
+    tables are unreliable in email clients (Outlook ignores them)."""
+    buttons = [html for group in button_html_groups for html in _split_buttons(group)]
+    if not buttons:
+        return ""
+    spacer = f'<div style="height: {BUTTON_STACK_GAP}; line-height: {BUTTON_STACK_GAP}; font-size: 1px;">&nbsp;</div>'
+    return (
+        f'<div class="email-buttons" style="margin: {BUTTON_BLOCK_MARGIN}; text-align: center;">'
+        + spacer.join(buttons)
+        + "</div>"
+    )
+
+
+def _split_buttons(html):
+    """The builders return their buttons concatenated; split them back into
+    individual tables so build_buttons_block_html can space them evenly."""
+    if not html:
+        return []
+    marker = '<table role="presentation" class="email-button"'
+    return [marker + part for part in html.split(marker) if part]
 
 
 def build_webinar_html(webinar_data, accent_color):
@@ -1949,6 +2018,7 @@ def build_link_buttons_html(link_buttons, accent_color):
 
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 
 def _load_theme_colors(doc_part):
@@ -2196,6 +2266,47 @@ def _effective_run_size_pt(run):
     return None
 
 
+# Ratio applied to every explicit run size, set per document in the main
+# loop (see _dominant_body_size_pt). A module global rather than a parameter
+# for the same reason as ACCENT_COLOR: process_run is called from a dozen
+# places and threading one more argument through all of them buys nothing.
+CURRENT_FONT_SCALE = 1.0
+
+
+def _dominant_body_size_pt(doc, fallback_pt):
+    """Detects the source document's BODY text size: the font size carrying
+    the most characters across all non-heading paragraphs (tables included).
+
+    Why not just docDefaults: generated documents (the Node docx pipeline in
+    particular) usually stamp an explicit size on every single run and leave
+    docDefaults at Word's stock value, so the default says nothing about
+    what the body actually uses. Counting characters is robust to a few
+    larger titles or smaller footnotes, which are exactly the sizes that
+    should NOT be treated as the body."""
+    counts = {}
+    for p_el in doc.element.body.iter(f"{{{W_NS}}}p"):
+        paragraph = Paragraph(p_el, doc)
+        style_name = (paragraph.style.name if paragraph.style is not None else "") or ""
+        if style_name.startswith("Heading"):
+            continue
+        for r_el in p_el.iter(f"{{{W_NS}}}r"):
+            run = Run(r_el, paragraph)
+            text = run.text.strip()
+            if not text:
+                continue
+            size = _effective_run_size_pt(run) or fallback_pt
+            counts[size] = counts.get(size, 0) + len(text)
+    if not counts:
+        return fallback_pt
+    return max(counts, key=counts.get)
+
+
+def _scaled_size_pt(size_pt):
+    """Applies CURRENT_FONT_SCALE and rounds to the nearest half point, so
+    the output reads 11.5pt / 13pt rather than 11.499999pt."""
+    return round(size_pt * CURRENT_FONT_SCALE * 2) / 2
+
+
 def _resolve_color(color_element, theme_colors):
     """Given a <w:color> element, returns its hex value: the literal w:val
     if present, otherwise the resolved theme color it points to."""
@@ -2431,6 +2542,12 @@ MAX_IMG_WIDTH_PX = 920  # a hair under the 960px page width (BODY_MAX_WIDTH
 # getting stretched.
 LARGE_IMAGE_MIN_WIDTH_PX = 680
 
+# Every image that ISN'T full-bleed (banners, logos, inline charts) is shown at
+# its Word width multiplied by this factor, capped at MAX_IMG_WIDTH_PX. Full-bleed
+# images already fill the page, so they can't grow further without widening the
+# whole email. Set to 1.0 to go back to exact Word sizes.
+IMAGE_SCALE = 1.3
+
 
 def _inline_image_width_px(blip):
     """Reads the image's actual display width as set in the source .docx
@@ -2457,6 +2574,34 @@ def _inline_image_width_px(blip):
         return round(int(cx) / EMU_PER_PX)
     except ValueError:
         return None
+
+
+def _renderable_blips(element):
+    """Returns the image blips inside element that should actually be shown.
+
+    Word wraps many drawings in <mc:AlternateContent>: an <mc:Choice> with
+    the modern version and an <mc:Fallback> with a copy for older readers.
+    Both usually carry their own <a:blip>, often pointing at DIFFERENT image
+    parts (the fallback may be an older, stale or lower-quality rendition).
+    Collecting every blip - which is what this code used to do - emitted the
+    same banner twice, or the stale fallback banner, depending on order.
+    That was the "two banners / wrong banner" bug.
+
+    Rule: a blip inside an mc:Fallback is dropped whenever the Choice branch
+    of the same AlternateContent already supplies an image. A Fallback is
+    kept only when it is the sole source of an image."""
+    result = []
+    for blip in element.xpath('.//*[local-name()="blip"]'):
+        fallback = blip.xpath('ancestor::*[local-name()="Fallback"][1]')
+        if fallback:
+            alt = fallback[0].getparent()
+            choice_has_image = alt is not None and alt.xpath(
+                './*[local-name()="Choice"]//*[local-name()="blip"]'
+            )
+            if choice_has_image:
+                continue
+        result.append(blip)
+    return result
 
 
 def process_run(run, doc_part, images_dir, image_counter, theme_colors, is_heading=False, file_prefix=""):
@@ -2499,7 +2644,12 @@ def process_run(run, doc_part, images_dir, image_counter, theme_colors, is_headi
             styles.append(f"color: #{run_color};")
         run_size_pt = _effective_run_size_pt(run)
         if run_size_pt and not is_heading:
-            styles.append(f"font-size: {run_size_pt}pt;")
+            scaled = _scaled_size_pt(run_size_pt)
+            # Body-sized runs inherit from <body> instead of repeating the
+            # size inline on every span - same result, far less markup, and
+            # one place (BODY_FONT_SIZE_PT) that actually controls it.
+            if scaled != BODY_FONT_SIZE_PT:
+                styles.append(f"font-size: {scaled}pt;")
 
         start_tags, end_tags = "", ""
         if is_bold:
@@ -2520,7 +2670,7 @@ def process_run(run, doc_part, images_dir, image_counter, theme_colors, is_headi
         html_parts.append(f"{start_tags}{text}{end_tags}")
 
     # Handle Inline Embedded Images
-    for blip in run._element.xpath('.//*[local-name()="blip"]'):
+    for blip in _renderable_blips(run._element):
         embed_id = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
         if embed_id and embed_id in doc_part.related_parts:
             img_part = doc_part.related_parts[embed_id]
@@ -2564,7 +2714,7 @@ def process_run(run, doc_part, images_dir, image_counter, theme_colors, is_headi
                     # recorded, which is usually a bit narrower.
                     width_attr = f' style="width: 100%; max-width: {MAX_IMG_WIDTH_PX}px;"'
                 else:
-                    width_px = min(width_px, MAX_IMG_WIDTH_PX)
+                    width_px = min(round(width_px * IMAGE_SCALE), MAX_IMG_WIDTH_PX)
                     width_attr = f' style="width: {width_px}px; max-width: 100%;"'
             else:
                 width_attr = ""
@@ -2605,6 +2755,195 @@ def _wrap_in_text_column(chunks):
     if is_open:
         wrapped.append("</div>")
     return wrapped
+
+
+def _attr_escape(value):
+    """Escapes a value for use inside a double-quoted HTML attribute.
+    _html_escape alone leaves '"' untouched, so a URL containing a quote
+    would end the href early and swallow the rest of the tag."""
+    return _html_escape(value).replace('"', "&quot;")
+
+
+_ALIGNMENT_CSS = {
+    "center": "center",
+    "right": "right",
+    "end": "right",
+    "both": "justify",
+    "distribute": "justify",
+}
+
+
+def _paragraph_alignment_css(p):
+    """Returns a text-align declaration for the paragraph's alignment (w:jc),
+    read from direct formatting first and then up the paragraph style chain.
+
+    Only center / right / justify are emitted. Left-aligned paragraphs are
+    deliberately left to the stylesheet's BODY_TEXT_ALIGN (justify), because
+    justified body text was an explicit choice for these emails, and many
+    generated documents stamp "left" on every paragraph by default - honouring
+    that literally would silently undo it. Centered titles and right-aligned
+    figures, which used to be flattened to justify, now keep their layout."""
+    jc = None
+    pPr = p._p.pPr
+    if pPr is not None:
+        jc_el = pPr.find(f"{{{W_NS}}}jc")
+        if jc_el is not None:
+            jc = jc_el.get(f"{{{W_NS}}}val")
+    style = p.style
+    seen = set()
+    while jc is None and style is not None and id(style) not in seen:
+        seen.add(id(style))
+        found = style._element.xpath('./*[local-name()="pPr"]/*[local-name()="jc"]')
+        if found:
+            jc = found[0].get(f"{{{W_NS}}}val")
+        style = getattr(style, "base_style", None)
+    css = _ALIGNMENT_CSS.get((jc or "").lower())
+    return [f"text-align: {css};"] if css else []
+
+
+_HYPERLINK_INSTR_RE = re.compile(r'HYPERLINK\s+(?:"([^"]*)"|(\S+))(.*)', re.IGNORECASE | re.DOTALL)
+_HYPERLINK_ANCHOR_RE = re.compile(r'\\l\s+"([^"]*)"')
+
+
+def _hyperlink_url_from_instr(instr):
+    r"""Extracts the target URL from a HYPERLINK field instruction, e.g.
+    HYPERLINK "https://example.com" \o "tooltip". Returns None for internal
+    bookmark links (\l "anchor" with no URL), which have nothing to open in
+    an email."""
+    match = _HYPERLINK_INSTR_RE.search(instr or "")
+    if not match:
+        return None
+    url = (match.group(1) or match.group(2) or "").strip()
+    if url.startswith("\\"):  # e.g. HYPERLINK \l "anchor": no URL at all
+        return None
+    anchor = _HYPERLINK_ANCHOR_RE.search(match.group(3) or "")
+    if url and anchor:
+        url = f"{url}#{anchor.group(1)}"
+    return url or None
+
+
+def _link_html(url, inner_html):
+    return f'<a href="{_attr_escape(url)}" target="_blank" rel="noopener">{inner_html}</a>'
+
+
+# Containers whose children are ordinary paragraph content. Word wraps runs
+# in these for tracked insertions (ins, moveTo), content controls (sdt),
+# smart tags, custom XML and bidi overrides. The old loop only recognised
+# direct w:r and w:hyperlink children, so any text inside one of these was
+# silently DROPPED from the email - a whole sentence could vanish.
+_TRANSPARENT_INLINE_CONTAINERS = {"ins", "moveTo", "smartTag", "customXml", "bdo", "dir", "sdtContent"}
+# Tracked deletions: text the author removed. Must not be shown.
+_SKIPPED_INLINE_CONTAINERS = {"del", "moveFrom"}
+
+
+class _InlineRenderer:
+    """Renders a paragraph's inline content to HTML, including the parts the
+    old loop skipped:
+
+      * runs nested inside content controls / tracked insertions / smart tags;
+      * simple fields (w:fldSimple), e.g. HYPERLINK;
+      * complex fields - the fldChar begin / instrText / separate / result /
+        end sequence Word uses for most hyperlinks it creates itself. Before,
+        their visible text came through but the link target was lost, so the
+        text looked like a link in Word and was dead in the email.
+
+    Field state spans sibling elements (a field routinely begins in one run
+    and ends several runs later), so it lives on the instance for the whole
+    paragraph rather than in any one recursive call."""
+
+    def __init__(self, p, render_run):
+        self.p = p
+        self.render_run = render_run
+        self.field_stack = []  # each: {"instr": [...], "in_result": bool, "html": [...]}
+
+    def _emit(self, html, out):
+        if self.field_stack:
+            top = self.field_stack[-1]
+            if top["in_result"]:
+                top["html"].append(html)
+            # text in a field's INSTRUCTION phase is code, never content
+            return
+        out.append(html)
+
+    def _handle_field_run(self, r_el, out):
+        """Processes fldChar / instrText in a run. Returns True if the run
+        was a field-control run (and so must not be rendered as text)."""
+        handled = False
+        for child in r_el:
+            name = etree.QName(child).localname
+            if name == "fldChar":
+                handled = True
+                kind = child.get(f"{{{W_NS}}}fldCharType")
+                if kind == "begin":
+                    self.field_stack.append({"instr": [], "in_result": False, "html": []})
+                elif kind == "separate" and self.field_stack:
+                    self.field_stack[-1]["in_result"] = True
+                elif kind == "end" and self.field_stack:
+                    field = self.field_stack.pop()
+                    self._emit(self._finish_field(field), out)
+            elif name == "instrText":
+                handled = True
+                if self.field_stack and not self.field_stack[-1]["in_result"]:
+                    self.field_stack[-1]["instr"].append(child.text or "")
+        return handled
+
+    def _finish_field(self, field):
+        inner = "".join(field["html"])
+        url = _hyperlink_url_from_instr("".join(field["instr"]))
+        return _link_html(url, inner) if (url and inner) else inner
+
+    def render_children(self, parent_el, out):
+        for child in parent_el:
+            name = etree.QName(child).localname
+            if name == "r":
+                if self._handle_field_run(child, out):
+                    continue
+                self._emit(self.render_run(Run(child, self.p)), out)
+            elif name == "hyperlink":
+                self._render_hyperlink(child, out)
+            elif name == "fldSimple":
+                inner = []
+                self.render_children(child, inner)
+                url = _hyperlink_url_from_instr(child.get(f"{{{W_NS}}}instr"))
+                html = "".join(inner)
+                self._emit(_link_html(url, html) if (url and html) else html, out)
+            elif name == "sdt":
+                content = child.find(f"{{{W_NS}}}sdtContent")
+                if content is not None:
+                    self.render_children(content, out)
+            elif name in _TRANSPARENT_INLINE_CONTAINERS:
+                self.render_children(child, out)
+            elif name in _SKIPPED_INLINE_CONTAINERS:
+                continue
+            # anything else (pPr, bookmarks, proofErr, comments...) carries
+            # no visible content
+
+    def _render_hyperlink(self, h_el, out):
+        rId = h_el.get(f"{{{R_NS}}}id")
+        anchor = h_el.get(f"{{{W_NS}}}anchor")
+        url = ""
+        rels = self.p.part.rels
+        if rId and rId in rels:
+            url = rels[rId].target_ref
+            if anchor:
+                url = f"{url}#{anchor}"
+        # An anchor-only hyperlink jumps to a bookmark inside the .docx;
+        # there's nothing for it to point at in the email, so it becomes text.
+        inner = []
+        self.render_children(h_el, inner)
+        html = "".join(inner)
+        self._emit(_link_html(url, html) if (url and html) else html, out)
+
+    def render(self):
+        out = []
+        self.render_children(self.p._p, out)
+        # A field left open at the end of the paragraph (it spans into the
+        # next one) - keep whatever result text it gathered rather than
+        # losing it.
+        while self.field_stack:
+            field = self.field_stack.pop()
+            self._emit("".join(field["html"]), out)
+        return out
 
 
 def process_paragraph(p, doc_part, images_dir, image_counter, theme_colors, file_prefix="", force_tag=None, prefix_html=None):
@@ -2648,7 +2987,9 @@ def process_paragraph(p, doc_part, images_dir, image_counter, theme_colors, file
     # Preserve direct paragraph formatting (border/spacing/shading) - this is
     # how some documents fake a heading look without using a real Word
     # Heading style.
-    style_declarations.extend(_paragraph_border_css(p))
+    border_declarations = _paragraph_border_css(p)
+    style_declarations.extend(_paragraph_alignment_css(p))
+    style_declarations.extend(border_declarations)
     style_declarations.extend(_paragraph_spacing_css(p))
     style_declarations.extend(_paragraph_shading_css(p))
     if force_tag != "li":
@@ -2668,26 +3009,24 @@ def process_paragraph(p, doc_part, images_dir, image_counter, theme_colors, file
     p_html = [f"<{tag}{inline_style}>"]
     if prefix_html:
         p_html.append(prefix_html)
-    for child in p._element:
-        if child.tag.endswith("}r"):
-            run = Run(child, p)
-            p_html.append(process_run(run, doc_part, images_dir, image_counter, theme_colors, is_heading, file_prefix))
+    renderer = _InlineRenderer(
+        p,
+        lambda run: process_run(run, doc_part, images_dir, image_counter, theme_colors, is_heading, file_prefix),
+    )
+    content_html = renderer.render()
+    p_html.extend(content_html)
 
-        elif child.tag.endswith("}hyperlink"):
-            rId = child.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
-            url = ""
-            if rId and rId in doc_part.rels:
-                url = doc_part.rels[rId].target_ref
+    inner = "".join(content_html)
+    visible_text = re.sub(r"<[^>]+>", "", inner).replace("&nbsp;", "").strip()
 
-            link_html = []
-            for r_node in child.xpath('.//*[local-name()="r"]'):
-                run = Run(r_node, p)
-                link_html.append(process_run(run, doc_part, images_dir, image_counter, theme_colors, is_heading, file_prefix))
-
-            if url:
-                p_html.append(f'<a href="{url}" target="_blank">{"".join(link_html)}</a>')
-            else:
-                p_html.append("".join(link_html))
+    # An EMPTY paragraph whose only feature is a border is a horizontal rule
+    # (Word's "---" + Enter AutoFormat, or a generated section separator).
+    # Those were rendering as stray lines across the email - the line at the
+    # bottom of the Irivest and Chahine sections. A border on a paragraph
+    # that HAS text is kept: that's the faked-heading case this border
+    # support exists for.
+    if border_declarations and not visible_text and "<img" not in inner and not prefix_html:
+        return ""
 
     p_html.append(f"</{tag}>")
     html = "".join(p_html)
@@ -2695,11 +3034,150 @@ def process_paragraph(p, doc_part, images_dir, image_counter, theme_colors, file
     # A paragraph whose only content is an image is not "text": it must be
     # allowed to use the full page width rather than the narrower text column
     # (see TEXT_MAX_WIDTH). Tag it so the stylesheet can exempt it.
-    inner = "".join(p_html[1:-1])
-    if "<img" in inner and not re.sub(r"<[^>]+>", "", inner).strip():
+    if "<img" in inner and not visible_text:
         html = html.replace(f"<{tag}", f'<{tag} class="{IMAGE_BLOCK_CLASS}"', 1)
 
     return html
+
+def _render_block_sequence(blocks, ctx, out):
+    """Renders paragraphs (with list detection) and nested tables in order.
+    Shared by table cells so a cell gets exactly the same treatment as the
+    document body - including tables nested inside it, which the old cell
+    loop (cell.paragraphs only) silently dropped."""
+    list_renderer = ListRenderer()
+    for block in blocks:
+        if isinstance(block, Paragraph):
+            info = _paragraph_list_info(block, ctx["numbering_formats"])
+            if info:
+                _num_id, ilvl, fmt = info
+                out.append(list_renderer.open_or_adjust(ilvl, fmt))
+                marker = None if fmt in ORDERED_LIST_CSS_TYPE else _bullet_marker_html(ctx["bullet_color"])
+                out.append(process_paragraph(
+                    block, ctx["doc_part"], ctx["images_dir"], ctx["image_counter"],
+                    ctx["theme_colors"], ctx["file_prefix"], force_tag="li", prefix_html=marker,
+                ))
+            else:
+                out.append(list_renderer.close_all())
+                out.append(process_paragraph(
+                    block, ctx["doc_part"], ctx["images_dir"], ctx["image_counter"],
+                    ctx["theme_colors"], ctx["file_prefix"],
+                ))
+        elif isinstance(block, Table):
+            out.append(list_renderer.close_all())
+            out.extend(_render_table(block, ctx))
+    out.append(list_renderer.close_all())
+
+
+def _cell_style_declarations(tc):
+    """Background and vertical alignment from the cell's OWN properties
+    (w:tcPr). The old lookup searched the whole cell (.//shd), so shading on
+    a paragraph inside the cell could be mistaken for the cell's fill."""
+    styles = []
+    tcPr = tc.tcPr
+    if tcPr is None:
+        return styles
+    shd = tcPr.find(f"{{{W_NS}}}shd")
+    if shd is not None:
+        fill = shd.get(f"{{{W_NS}}}fill")
+        if fill and fill.lower() not in ("auto", "none"):
+            styles.append(f"background-color: #{fill};")
+    v_align = tcPr.find(f"{{{W_NS}}}vAlign")
+    if v_align is not None:
+        css = {"top": "top", "center": "middle", "bottom": "bottom"}.get(v_align.get(f"{{{W_NS}}}val"))
+        if css:
+            styles.append(f"vertical-align: {css};")
+    return styles
+
+
+def _table_cell_layout(table):
+    """Maps the table's real <w:tc> elements onto grid columns.
+
+    python-docx's row.cells returns one entry PER GRID COLUMN, repeating a
+    merged cell for every column it spans - so a gestora band spanning six
+    columns rendered its text six times across the row. This works from the
+    actual cells instead, recording each one's starting column, its colspan
+    (w:gridSpan) and its vertical-merge state (w:vMerge), and then computes
+    rowspans by looking down for "continue" cells in the same column."""
+    rows = []
+    for tr in table._tbl.tr_lst:
+        col = 0
+        trPr = tr.trPr
+        if trPr is not None:
+            before = trPr.find(f"{{{W_NS}}}gridBefore")
+            if before is not None:
+                try:
+                    col += int(before.get(f"{{{W_NS}}}val", "0"))
+                except ValueError:
+                    pass
+        row = []
+        for tc in tr.tc_lst:
+            span = tc.grid_span or 1
+            row.append({"tc": tc, "col": col, "colspan": span, "vmerge": tc.vMerge, "rowspan": 1})
+            col += span
+        rows.append(row)
+
+    for r_index, row in enumerate(rows):
+        for cell in row:
+            if cell["vmerge"] != "restart":
+                continue
+            span = 1
+            for below in rows[r_index + 1:]:
+                match = next((c for c in below if c["col"] == cell["col"]), None)
+                if match is not None and match["vmerge"] == "continue":
+                    span += 1
+                else:
+                    break
+            cell["rowspan"] = span
+    return rows
+
+
+def _render_table(table, ctx):
+    """Renders one Word table to HTML chunks. Bar-chart tables keep their
+    dedicated one-table-per-row layout (their column widths ARE the data);
+    everything else gets real colspan/rowspan and nested-table support."""
+    out = []
+    if _is_bar_chart_table(table):
+        # Wrapped so the chart as a whole gets the same breathing room as
+        # any other table, while its rows stay flush against each other.
+        out.append(f'<div class="bar-chart-block" style="margin: {TABLE_BLOCK_MARGIN};">')
+        for row in table.rows:
+            out.append('<table class="bar-chart-row">')
+            out.append("<tr>")
+            width_percents = _row_cell_width_percents(row)
+            for cell_index, cell in enumerate(row.cells):
+                cell_styles = _cell_style_declarations(cell._tc)
+                if width_percents and cell_index < len(width_percents):
+                    cell_styles.append(f"width: {width_percents[cell_index]:.4f}%;")
+                style_attr = f' style="{" ".join(cell_styles)}"' if cell_styles else ""
+                out.append(f"<td{style_attr}>")
+                _render_block_sequence(iter_block_items(cell), ctx, out)
+                out.append("</td>")
+            out.append("</tr>")
+            out.append("</table>")
+        out.append("</div>")
+        return out
+
+    out.append("<table>")
+    for row in _table_cell_layout(table):
+        out.append("<tr>")
+        for cell in row:
+            if cell["vmerge"] == "continue":
+                continue  # covered by the rowspan of the cell above
+            attrs = ""
+            if cell["colspan"] > 1:
+                attrs += f' colspan="{cell["colspan"]}"'
+            if cell["rowspan"] > 1:
+                attrs += f' rowspan="{cell["rowspan"]}"'
+            cell_styles = _cell_style_declarations(cell["tc"])
+            if cell_styles:
+                attrs += f' style="{" ".join(cell_styles)}"'
+            out.append(f"<td{attrs}>")
+            _render_block_sequence(iter_block_items(_Cell(cell["tc"], table)), ctx, out)
+            out.append("</td>")
+        out.append("</tr>")
+    out.append("</table>")
+    return out
+
 
 # --- Execution pipeline ---
 # --- Progress window shown while converting ---
@@ -2898,10 +3376,29 @@ if __name__ == "__main__":
         doc = Document(docx_path)
         theme_colors = _load_theme_colors(doc.part)
         doc_default_size_pt = _load_doc_default_size_pt(doc)
+        # Module-level assignment: this pipeline runs at module scope, so it
+        # updates the global process_run reads (no `global` needed or allowed).
+        source_body_pt = _dominant_body_size_pt(
+            doc, doc_default_size_pt or BODY_FONT_SIZE_FALLBACK_PT
+        )
+        CURRENT_FONT_SCALE = BODY_FONT_SIZE_PT / source_body_pt
+        print(f"Body text: {source_body_pt}pt in the .docx -> {BODY_FONT_SIZE_PT}pt in the email "
+              f"(all other sizes scaled x{CURRENT_FONT_SCALE:.3f}).")
         numbering_formats = _load_numbering_formats(doc)
         html_body = []
         image_counter = [0]  # mutable int so nested calls can increment it
         list_renderer = ListRenderer()
+        # Everything table rendering needs, bundled so _render_table can
+        # recurse into nested tables without a ten-argument signature.
+        table_ctx = {
+            "doc_part": doc.part,
+            "images_dir": images_dir,
+            "image_counter": image_counter,
+            "theme_colors": theme_colors,
+            "file_prefix": file_prefix,
+            "numbering_formats": numbering_formats,
+            "bullet_color": selected_bullet_color,
+        }
 
         for block in iter_block_items(doc):
             if isinstance(block, Paragraph):
@@ -2917,56 +3414,7 @@ if __name__ == "__main__":
                     html_body.append(process_paragraph(block, doc.part, images_dir, image_counter, theme_colors, file_prefix))
             elif isinstance(block, Table):
                 html_body.append(list_renderer.close_all())
-                is_bar_chart = _is_bar_chart_table(block)
-                if not is_bar_chart:
-                    html_body.append("<table>")
-                for row in block.rows:
-                    # A bar chart emits one table per row so that each bar
-                    # keeps its own exact column widths under
-                    # table-layout: fixed (see BAR_CHART_TABLE_MARKER).
-                    if is_bar_chart:
-                        html_body.append('<table class="bar-chart-row">')
-                    html_body.append("<tr>")
-                    # For a bar chart the relative column widths ARE the
-                    # data, so they're emitted explicitly (see
-                    # _row_cell_width_percents). Normal tables keep the
-                    # existing auto layout.
-                    width_percents = _row_cell_width_percents(row) if is_bar_chart else None
-                    for cell_index, cell in enumerate(row.cells):
-                        # Extract cell background color, if any
-                        cell_styles = []
-                        shd_elements = cell._tc.xpath('.//*[local-name()="shd"]')
-                        if shd_elements:
-                            fill = shd_elements[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}fill')
-                            if fill and fill != 'auto' and fill != 'none':
-                                cell_styles.append(f"background-color: #{fill};")
-                        if width_percents and cell_index < len(width_percents):
-                            cell_styles.append(f"width: {width_percents[cell_index]:.4f}%;")
-                        bg_style = f' style="{" ".join(cell_styles)}"' if cell_styles else ""
-
-                        html_body.append(f"<td{bg_style}>")
-                        # Bullets/lists can also appear inside table cells
-                        # (e.g. "asset allocation y movimientos" bullets) -
-                        # each cell gets its own independent list context.
-                        cell_list_renderer = ListRenderer()
-                        for cell_p in cell.paragraphs:
-                            cell_list_info = _paragraph_list_info(cell_p, numbering_formats)
-                            if cell_list_info:
-                                c_num_id, c_ilvl, c_fmt = cell_list_info
-                                html_body.append(cell_list_renderer.open_or_adjust(c_ilvl, c_fmt))
-                                c_is_ordered = c_fmt in ORDERED_LIST_CSS_TYPE
-                                c_marker_html = None if c_is_ordered else _bullet_marker_html(selected_bullet_color)
-                                html_body.append(process_paragraph(cell_p, doc.part, images_dir, image_counter, theme_colors, file_prefix, force_tag="li", prefix_html=c_marker_html))
-                            else:
-                                html_body.append(cell_list_renderer.close_all())
-                                html_body.append(process_paragraph(cell_p, doc.part, images_dir, image_counter, theme_colors, file_prefix))
-                        html_body.append(cell_list_renderer.close_all())
-                        html_body.append("</td>")
-                    html_body.append("</tr>")
-                    if is_bar_chart:
-                        html_body.append("</table>")
-                if not is_bar_chart:
-                    html_body.append("</table>")
+                html_body.extend(_render_table(block, table_ctx))
 
         html_body.append(list_renderer.close_all())
 
@@ -2976,10 +3424,8 @@ if __name__ == "__main__":
         # independent of the other), then the signature, then the
         # disclaimer, at the end of the document body.
         webinar_html = build_webinar_html(selected_webinar, selected_bullet_color)
-        html_body.append(webinar_html)
-
         link_buttons_html = build_link_buttons_html(selected_link_buttons, selected_bullet_color)
-        html_body.append(link_buttons_html)
+        html_body.append(build_buttons_block_html(webinar_html, link_buttons_html))
 
         signature_html = build_signature_html(selected_signature_key, images_dir)
         html_body.append(signature_html)
@@ -3004,13 +3450,8 @@ if __name__ == "__main__":
         table_header_tint = _lighten_hex_color(selected_bullet_color, TABLE_HEADER_TINT)
         table_border_color = _lighten_hex_color(selected_bullet_color, TABLE_BORDER_TINT)
         disclaimer_color = _mute_hex_color(selected_bullet_color, DISCLAIMER_MUTE)
-        # Fallback colors for the .email-button class. Per-button colors are
-        # emitted inline (see _build_button_html); these only matter if an
-        # inline style were ever stripped, so they just track the accent.
-        default_button_bg = selected_bullet_color
-        default_button_text_color = _readable_text_color(default_button_bg)
 
-        body_font_size_pt = doc_default_size_pt or BODY_FONT_SIZE_FALLBACK_PT
+        body_font_size_pt = BODY_FONT_SIZE_PT
 
         full_html = f"""<!DOCTYPE html>
 <html>
@@ -3053,7 +3494,12 @@ if __name__ == "__main__":
         table {{
             border-collapse: collapse;
             width: 100%;
-            margin: 10px 0;
+            margin: {TABLE_BLOCK_MARGIN};
+        }}
+        /* A table nested inside a cell shouldn't get the full between-tables
+           gap - that spacing is for separating blocks of the email. */
+        td table {{
+            margin: 6px 0;
         }}
         th, td {{
             border: 1px solid {table_border_color};
@@ -3158,28 +3604,22 @@ if __name__ == "__main__":
         .disclaimer-extra {{
             margin-top: {DISCLAIMER_GAP};
         }}
-        /* Shared by the webinar button and every custom link button. Only
-           shape/spacing lives here - each button's own background and label
-           color are written inline by _build_button_html, so buttons of
-           different colors can sit in the same email and so Outlook (which
-           drops <style> rules) still renders them correctly. */
-        .email-button-block {{
-            text-align: center;
-            margin: {BUTTON_BLOCK_MARGIN};
+        /* Buttons carry ALL their styling inline (see _build_button_html),
+           so nothing here is needed to render them. This only neutralises
+           the generic table/td rules above for button tables, as a second
+           line of defence where a client applies <style> but also ignores
+           some inline declarations. */
+        table.email-button {{
+            width: auto;
+            margin: 0 auto;
+            border-collapse: separate;
         }}
-        .email-button-block + .email-button-block {{
-            margin-top: {BUTTON_STACK_GAP};
+        table.email-button td {{
+            border: none;
+            padding: 0;
         }}
-        .email-button {{
-            display: inline-block;
-            background-color: {default_button_bg};
-            color: {default_button_text_color};
-            font-weight: bold;
+        table.email-button a {{
             text-decoration: none;
-            padding: {BUTTON_PADDING};
-            border-radius: {BUTTON_BORDER_RADIUS};
-            font-size: {BUTTON_FONT_SIZE};
-            letter-spacing: 0.5px;
         }}
     </style>
 </head>
