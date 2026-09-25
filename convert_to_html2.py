@@ -229,9 +229,9 @@ LIST_ITEM_MARGIN = "3px 0"
 # It read as a stray orange line dropped into the middle of the email, so it's
 # gone: the block is now separated by whitespace only (SIGNATURE_BLOCK_MARGIN_TOP
 # + SIGNATURE_BLOCK_PADDING_TOP).
-SIGNATURE_BLOCK_MARGIN_TOP = "40px"
+SIGNATURE_BLOCK_MARGIN_TOP = "2px"
 SIGNATURE_BLOCK_PADDING_TOP = "20px"
-SIGNATURE_IMAGE_MAX_WIDTH = "420px"  # was 650px - the signature read as oversized next to the body text
+SIGNATURE_IMAGE_MAX_WIDTH = "480px"  # was 650px - the signature read as oversized next to the body text
 SIGNATURE_CELL_SPACING = "20px"  # unused now that the signature is image-only (no adjacent text cell)
 SIGNATURE_FONT_SIZE = "10pt"  # unused now that the signature is image-only (no adjacent text cell)
 
