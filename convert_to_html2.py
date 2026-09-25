@@ -22,6 +22,16 @@ from docx.table import _Cell, Table
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
+# Bump this on every change you push. The launcher downloads this file fresh
+# on each run, so the number printed at startup is proof of WHICH version is
+# actually running - the quickest way to tell a real update apart from a
+# cached copy when something looks wrong on someone else's PC.
+#
+# Convention: YYYY.MM.DD.N (N = the nth change that day). Sorts naturally
+# and says at a glance how old a coworker's copy is.
+SCRIPT_VERSION = "2026.09.25.1"
+
+
 # SIGNATURE CONFIGURATION: the entries in SIGNATURES below are the built-in
 # ones shipped with this script. Each entry has "label" (list text), "image"
 # (path inside Firmas/), and "lines" (contact lines, each with "text",
@@ -229,9 +239,9 @@ LIST_ITEM_MARGIN = "3px 0"
 # It read as a stray orange line dropped into the middle of the email, so it's
 # gone: the block is now separated by whitespace only (SIGNATURE_BLOCK_MARGIN_TOP
 # + SIGNATURE_BLOCK_PADDING_TOP).
-SIGNATURE_BLOCK_MARGIN_TOP = "2px"
-SIGNATURE_BLOCK_PADDING_TOP = "20px"
-SIGNATURE_IMAGE_MAX_WIDTH = "480px"  # was 650px - the signature read as oversized next to the body text
+SIGNATURE_BLOCK_MARGIN_TOP = "18px"   # was 40px - the signature sat too far
+SIGNATURE_BLOCK_PADDING_TOP = "6px"   # was 20px   below the end of the text
+SIGNATURE_IMAGE_MAX_WIDTH = "420px"  # was 650px - the signature read as oversized next to the body text
 SIGNATURE_CELL_SPACING = "20px"  # unused now that the signature is image-only (no adjacent text cell)
 SIGNATURE_FONT_SIZE = "10pt"  # unused now that the signature is image-only (no adjacent text cell)
 
@@ -826,6 +836,9 @@ def _blend_hex_color(hex_color, toward, amount):
 
 # --- File selector ---
 def select_docx_files():
+    print("=" * 58)
+    print(f"  Altment DOCX -> HTML converter   v{SCRIPT_VERSION}")
+    print("=" * 58)
     print("Opening file selector...")
     root = tk.Tk()
     root.withdraw()
