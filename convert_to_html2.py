@@ -114,15 +114,10 @@ TEXT_COLUMN_CLASS = "text-column"    # wrapper <div> the text column is built
                                       # edge of the page
 BODY_PADDING = "20px"
 BODY_TEXT_ALIGN = "justify"          # all body text is justified
-BODY_FONT_SIZE_PT = 11.5             # body text size in the email (Arial 11.5)
-BODY_FONT_SIZE_FALLBACK_PT = 10      # the SOURCE doc's body size, used only if
-                                      # it can't be detected - see
-                                      # _dominant_body_size_pt. Every run size in
-                                      # the .docx is scaled by
-                                      # BODY_FONT_SIZE_PT / <detected body size>,
-                                      # so body text lands on 11.5pt while
-                                      # deliberately larger/smaller text (fund
-                                      # names, footnotes) keeps its proportion.
+BODY_FONT_SIZE_FALLBACK_PT = 10      # used only if a doc's own default size can't be read.
+                                      # Text sizes are taken from the .docx as-is:
+                                      # the Word document is the single source of
+                                      # truth for how big anything is.
 
 
 # --------------------------------------------------------------------
@@ -2266,47 +2261,6 @@ def _effective_run_size_pt(run):
     return None
 
 
-# Ratio applied to every explicit run size, set per document in the main
-# loop (see _dominant_body_size_pt). A module global rather than a parameter
-# for the same reason as ACCENT_COLOR: process_run is called from a dozen
-# places and threading one more argument through all of them buys nothing.
-CURRENT_FONT_SCALE = 1.0
-
-
-def _dominant_body_size_pt(doc, fallback_pt):
-    """Detects the source document's BODY text size: the font size carrying
-    the most characters across all non-heading paragraphs (tables included).
-
-    Why not just docDefaults: generated documents (the Node docx pipeline in
-    particular) usually stamp an explicit size on every single run and leave
-    docDefaults at Word's stock value, so the default says nothing about
-    what the body actually uses. Counting characters is robust to a few
-    larger titles or smaller footnotes, which are exactly the sizes that
-    should NOT be treated as the body."""
-    counts = {}
-    for p_el in doc.element.body.iter(f"{{{W_NS}}}p"):
-        paragraph = Paragraph(p_el, doc)
-        style_name = (paragraph.style.name if paragraph.style is not None else "") or ""
-        if style_name.startswith("Heading"):
-            continue
-        for r_el in p_el.iter(f"{{{W_NS}}}r"):
-            run = Run(r_el, paragraph)
-            text = run.text.strip()
-            if not text:
-                continue
-            size = _effective_run_size_pt(run) or fallback_pt
-            counts[size] = counts.get(size, 0) + len(text)
-    if not counts:
-        return fallback_pt
-    return max(counts, key=counts.get)
-
-
-def _scaled_size_pt(size_pt):
-    """Applies CURRENT_FONT_SCALE and rounds to the nearest half point, so
-    the output reads 11.5pt / 13pt rather than 11.499999pt."""
-    return round(size_pt * CURRENT_FONT_SCALE * 2) / 2
-
-
 def _resolve_color(color_element, theme_colors):
     """Given a <w:color> element, returns its hex value: the literal w:val
     if present, otherwise the resolved theme color it points to."""
@@ -2644,12 +2598,7 @@ def process_run(run, doc_part, images_dir, image_counter, theme_colors, is_headi
             styles.append(f"color: #{run_color};")
         run_size_pt = _effective_run_size_pt(run)
         if run_size_pt and not is_heading:
-            scaled = _scaled_size_pt(run_size_pt)
-            # Body-sized runs inherit from <body> instead of repeating the
-            # size inline on every span - same result, far less markup, and
-            # one place (BODY_FONT_SIZE_PT) that actually controls it.
-            if scaled != BODY_FONT_SIZE_PT:
-                styles.append(f"font-size: {scaled}pt;")
+            styles.append(f"font-size: {run_size_pt}pt;")
 
         start_tags, end_tags = "", ""
         if is_bold:
@@ -3019,14 +2968,10 @@ def process_paragraph(p, doc_part, images_dir, image_counter, theme_colors, file
     inner = "".join(content_html)
     visible_text = re.sub(r"<[^>]+>", "", inner).replace("&nbsp;", "").strip()
 
-    # An EMPTY paragraph whose only feature is a border is a horizontal rule
-    # (Word's "---" + Enter AutoFormat, or a generated section separator).
-    # Those were rendering as stray lines across the email - the line at the
-    # bottom of the Irivest and Chahine sections. A border on a paragraph
-    # that HAS text is kept: that's the faked-heading case this border
-    # support exists for.
-    if border_declarations and not visible_text and "<img" not in inner and not prefix_html:
-        return ""
+    # Empty paragraphs carrying only a border are deliberately KEPT: the
+    # factsheet prompt builds its accent-coloured separator between funds
+    # exactly that way. Whether a separator should exist at a given point is
+    # a content decision, so it's controlled in the prompt, not here.
 
     p_html.append(f"</{tag}>")
     html = "".join(p_html)
@@ -3177,6 +3122,208 @@ def _render_table(table, ctx):
         out.append("</tr>")
     out.append("</table>")
     return out
+
+
+# ---------------------------------------------------------------------
+# CSS inlining
+# ---------------------------------------------------------------------
+# Mailchimp (and several other senders) drop a <style> block when the HTML
+# is pasted into a content block: the campaign PREVIEW renders the file
+# whole and looks perfect, then the delivered email arrives with no table
+# borders, no header tints and text running edge to edge. Outlook makes it
+# worse by ignoring parts of <style> even when it survives.
+#
+# So the stylesheet is treated as a source, not as the delivery mechanism:
+# every rule is copied onto the elements it matches as an inline style
+# attribute, which no client strips. The <style> block is still emitted (it
+# costs nothing and keeps the standalone .html file readable), but nothing
+# depends on it any more.
+#
+# This is a deliberately small implementation covering exactly the selector
+# shapes this script emits - tag, .class, tag.class, descendant and child
+# combinators, comma-separated lists. It's not a general CSS engine, and it
+# doesn't need to be: it only ever sees the stylesheet built below.
+
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_CSS_RULE_RE = re.compile(r"([^{}]+)\{([^{}]*)\}", re.DOTALL)
+_SIMPLE_SELECTOR_RE = re.compile(r"^([a-zA-Z][\w-]*)?((?:\.[\w-]+)*)$")
+# Properties that only make sense for on-screen layout, or that an email
+# client would reject on an element: skipped rather than inlined.
+_NON_INLINABLE_PROPERTIES = {"cursor"}
+
+
+def _parse_css_rules(css):
+    """Returns [(selector, declarations, source_order), ...] with comments
+    and at-rules removed."""
+    css = _CSS_COMMENT_RE.sub("", css)
+    rules = []
+    for order, (selector_group, declarations) in enumerate(_CSS_RULE_RE.findall(css)):
+        declarations = declarations.strip()
+        if not declarations:
+            continue
+        for selector in selector_group.split(","):
+            selector = selector.strip()
+            if selector and not selector.startswith("@"):
+                rules.append((selector, declarations, order))
+    return rules
+
+
+def _selector_to_xpath(selector):
+    """Converts a simple CSS selector to XPath, or returns None for anything
+    outside the supported subset (pseudo-classes, attribute selectors, ...),
+    which is then left to the <style> block alone."""
+    tokens = selector.replace(">", " > ").split()
+    xpath = "."
+    child_combinator = False
+    for token in tokens:
+        if token == ">":
+            child_combinator = True
+            continue
+        match = _SIMPLE_SELECTOR_RE.match(token)
+        if not match:
+            return None
+        tag = match.group(1) or "*"
+        predicates = "".join(
+            f"[contains(concat(' ', normalize-space(@class), ' '), ' {cls} ')]"
+            for cls in match.group(2).split(".") if cls
+        )
+        xpath += ("/" if child_combinator else "//") + tag + predicates
+        child_combinator = False
+    return xpath
+
+
+def _selector_specificity(selector):
+    """(classes, tags) - enough ordering for this stylesheet, which has no
+    IDs or attribute selectors."""
+    return (selector.count("."), len(re.findall(r"(?:^|[\s>])([a-zA-Z][\w-]*)", selector)))
+
+
+def _split_declarations(declarations):
+    """Splits a declaration block into an ordered {property: value} dict,
+    dropping !important (meaningless once inline) and properties that don't
+    belong in an email."""
+    parsed = {}
+    for declaration in declarations.split(";"):
+        if ":" not in declaration:
+            continue
+        prop, _, value = declaration.partition(":")
+        prop = prop.strip().lower()
+        value = value.replace("!important", "").strip()
+        if prop and value and prop not in _NON_INLINABLE_PROPERTIES:
+            parsed[prop] = value
+    return parsed
+
+
+def _inline_stylesheet(html):
+    """Copies the document's own <style> rules onto matching elements as
+    inline styles and returns the rewritten HTML.
+
+    Precedence follows CSS: rules are applied least-specific first, and any
+    style already written inline by the converter (a cell's shading, a run's
+    colour, a button's background) is applied LAST so it always wins - those
+    carry the actual content, while the stylesheet only carries defaults."""
+    try:
+        from lxml import html as lxml_html
+    except ImportError:  # pragma: no cover - lxml is a hard dependency
+        return html
+
+    tree = lxml_html.fromstring(html)
+    style_elements = tree.xpath("//style")
+    if not style_elements:
+        return html
+
+    rules = []
+    for element in style_elements:
+        rules.extend(_parse_css_rules(element.text or ""))
+    rules.sort(key=lambda rule: (_selector_specificity(rule[0]), rule[2]))
+
+    pending = {}  # element -> merged declarations from the stylesheet
+    for selector, declarations, _order in rules:
+        xpath = _selector_to_xpath(selector)
+        if xpath is None:
+            continue
+        try:
+            matches = tree.xpath(xpath)
+        except Exception:
+            continue
+        parsed = _split_declarations(declarations)
+        for element in matches:
+            pending.setdefault(element, {}).update(parsed)
+
+    # Walk the tree root-first, tracking what each element would inherit, and
+    # drop any declaration that merely repeats an inherited value. On a long
+    # factsheet this removes thousands of redundant "text-align:justify" and
+    # "color:#333333" copies - which matters only because of Gmail's ~102 kB
+    # clipping threshold, but at these document sizes it genuinely decides
+    # whether the email arrives whole.
+    #
+    # font-family and font-size are deliberately NOT pruned: Outlook resets
+    # the font inside <table>, so those have to be restated on table cells
+    # even though CSS says they would inherit.
+    inheritable = ("color", "text-align", "line-height", "font-style",
+                   "font-weight", "letter-spacing")
+
+    def _apply(element, inherited):
+        declarations = pending.get(element, {})
+        own = _split_declarations(element.get("style", ""))
+        declarations.update(own)  # the element's own inline style wins
+
+        for prop in inheritable:
+            if prop in declarations and declarations[prop] == inherited.get(prop):
+                del declarations[prop]
+
+        if declarations:
+            element.set("style", "".join(f"{k}:{v};" for k, v in declarations.items()))
+        elif element.get("style") is not None:
+            del element.attrib["style"]
+
+        child_inherited = dict(inherited)
+        for prop in inheritable:
+            if prop in declarations:
+                child_inherited[prop] = declarations[prop]
+        # Presentational attributes set alignment too, and they are what the
+        # children actually inherit. Missing this once cost the whole email
+        # its justification: the button/container wrapper carries
+        # align="center", so pruning a "redundant" text-align:justify below
+        # it let the centre alignment take over instead.
+        align = element.get("align")
+        if align:
+            child_inherited["text-align"] = align.lower()
+        for child in element:
+            _apply(child, child_inherited)
+
+    _apply(tree, {})
+
+    # The <style> block is now redundant - every rule it held is inline on
+    # the elements. Dropping it matters because of Gmail's ~102 kB clipping
+    # threshold: past it Gmail truncates the message and shows "View entire
+    # message", which on a long factsheet would cut the email mid-table.
+    for element in style_elements:
+        element.getparent().remove(element)
+
+    return lxml_html.tostring(tree, encoding="unicode", doctype="<!DOCTYPE html>")
+
+
+def _email_container_open(font_family, font_color, font_size_pt, line_height,
+                          max_width, padding, text_align):
+    """Opens the wrapper that replaces <body> for layout purposes.
+
+    Pasting into a Mailchimp content block discards <html>/<body> entirely,
+    so any styling on <body> - the font, the 960px column, the centering -
+    goes with them. This reproduces all of it on elements that survive: an
+    outer 100%-width table (Outlook centres via align/table, not margin:auto)
+    around an inner div carrying the width cap and the typography."""
+    return (
+        '<table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" '
+        'style="width: 100%; border-collapse: collapse; border: none;">'
+        '<tr><td align="center" style="border: none; padding: 0;">'
+        f'<div class="email-container" style="max-width: {max_width}; margin: 0 auto; '
+        f'padding: {padding}; font-family: {font_family}; color: {font_color}; '
+        f'font-size: {font_size_pt}pt; line-height: {line_height}; text-align: {text_align};">'
+    )
+
+
+_EMAIL_CONTAINER_CLOSE = "</div></td></tr></table>"
 
 
 # --- Execution pipeline ---
@@ -3376,14 +3523,6 @@ if __name__ == "__main__":
         doc = Document(docx_path)
         theme_colors = _load_theme_colors(doc.part)
         doc_default_size_pt = _load_doc_default_size_pt(doc)
-        # Module-level assignment: this pipeline runs at module scope, so it
-        # updates the global process_run reads (no `global` needed or allowed).
-        source_body_pt = _dominant_body_size_pt(
-            doc, doc_default_size_pt or BODY_FONT_SIZE_FALLBACK_PT
-        )
-        CURRENT_FONT_SCALE = BODY_FONT_SIZE_PT / source_body_pt
-        print(f"Body text: {source_body_pt}pt in the .docx -> {BODY_FONT_SIZE_PT}pt in the email "
-              f"(all other sizes scaled x{CURRENT_FONT_SCALE:.3f}).")
         numbering_formats = _load_numbering_formats(doc)
         html_body = []
         image_counter = [0]  # mutable int so nested calls can increment it
@@ -3451,7 +3590,13 @@ if __name__ == "__main__":
         table_border_color = _lighten_hex_color(selected_bullet_color, TABLE_BORDER_TINT)
         disclaimer_color = _mute_hex_color(selected_bullet_color, DISCLAIMER_MUTE)
 
-        body_font_size_pt = BODY_FONT_SIZE_PT
+        body_font_size_pt = doc_default_size_pt or BODY_FONT_SIZE_FALLBACK_PT
+
+        container_open = _email_container_open(
+            BODY_FONT_FAMILY, BODY_FONT_COLOR, body_font_size_pt,
+            BODY_LINE_HEIGHT, BODY_MAX_WIDTH, BODY_PADDING, BODY_TEXT_ALIGN,
+        )
+        container_close = _EMAIL_CONTAINER_CLOSE
 
         full_html = f"""<!DOCTYPE html>
 <html>
@@ -3623,10 +3768,15 @@ if __name__ == "__main__":
         }}
     </style>
 </head>
-<body>
-    {raw_html}
+<body style="margin: 0; padding: 0; width: 100%;">
+    {container_open}{raw_html}{container_close}
 </body>
 </html>"""
+
+        # Bake the stylesheet onto the elements themselves. Everything above
+        # is written for readability; this is what makes the email survive a
+        # client that discards <style> (see _inline_stylesheet).
+        full_html = _inline_stylesheet(full_html)
 
         progress.step(f"Writing HTML for {filename}...")
 
