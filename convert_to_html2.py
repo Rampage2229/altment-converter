@@ -241,7 +241,7 @@ LIST_ITEM_MARGIN = "3px 0"
 # + SIGNATURE_BLOCK_PADDING_TOP).
 SIGNATURE_BLOCK_MARGIN_TOP = "6px"   # was 40px - the signature sat too far
 SIGNATURE_BLOCK_PADDING_TOP = "6px"   # was 20px   below the end of the text
-SIGNATURE_IMAGE_MAX_WIDTH = "480px"  # was 650px - the signature read as oversized next to the body text
+SIGNATURE_IMAGE_MAX_WIDTH = "500px"  # was 650px - the signature read as oversized next to the body text
 SIGNATURE_CELL_SPACING = "20px"  # unused now that the signature is image-only (no adjacent text cell)
 SIGNATURE_FONT_SIZE = "10pt"  # unused now that the signature is image-only (no adjacent text cell)
 
